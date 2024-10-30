@@ -5,14 +5,17 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"os"
 	"strings"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/joho/godotenv"
 )
 
 // USDT contract address
@@ -27,84 +30,88 @@ type USDT interface {
 }
 
 func main() {
-	// Connect to the Ethereum mainnet
-	client, err := ethclient.Dial("https://eth.llamarpc.com")
+	// load .env file
+	err := godotenv.Load()
 	if err != nil {
-		log.Fatalf("Failed to connect to the Ethereum mainnet: %v", err)
+		log.Fatal("Error loading .env file")
 	}
 
-	// Get the USDT contract instance
+	// get infura project id
+	infuraProjectID := os.Getenv("INFURA_PROJECT_ID")
+	if infuraProjectID == "" {
+		log.Fatal("Please set INFURA_PROJECT_ID in .env file")
+	}
+
+	// build websocket url
+	wsURL := "wss://mainnet.infura.io/ws/v3/" + infuraProjectID
+
+	// connect to ethereum websocket node
+	client, err := ethclient.Dial(wsURL)
+	if err != nil {
+		log.Fatalf("Failed to connect to the Ethereum network: %v", err)
+	}
+
+	// get usdt contract instance
 	usdtAddress := common.HexToAddress(USDT_CONTRACT_ADDRESS)
 	usdt, err := NewUSDT(usdtAddress, client)
 	if err != nil {
 		log.Fatalf("Failed to create USDT contract instance: %v", err)
 	}
 
-	// Get the USDT decimal places
+	// get usdt decimal places
 	decimals, err := usdt.Decimals(&bind.CallOpts{})
 	if err != nil {
 		log.Fatalf("Failed to get USDT decimal places: %v", err)
 	}
 
 	fmt.Printf("USDT decimal places: %s\n", decimals.String())
+	fmt.Println("Starting to monitor USDT transfers...")
 
-	// Get the latest block number
-	header, err := client.HeaderByNumber(context.Background(), nil)
-	if err != nil {
-		log.Fatalf("Failed to get the latest block number: %v", err)
-	}
-	latestBlock := header.Number.Uint64()
-
-	// Calculate the start block number (last 100 blocks)
-	startBlock := latestBlock - 99
-	if startBlock < 0 {
-		startBlock = 0
-	}
-
-	// Query USDT transfer records
-	err = getUSDTTransfers(client, startBlock, latestBlock, decimals.Uint64())
-	if err != nil {
-		log.Fatalf("Failed to query USDT transfer records: %v", err)
-	}
-}
-
-func getUSDTTransfers(client *ethclient.Client, startBlock uint64, endBlock uint64, decimals uint64) error {
-	usdtAddress := common.HexToAddress(USDT_CONTRACT_ADDRESS)
-	transferSig := []byte(TRANSFER_EVENT_SIGNATURE)
-	transferTopic := crypto.Keccak256Hash(transferSig)
-
+	// create filter query
 	query := ethereum.FilterQuery{
-		FromBlock: big.NewInt(int64(startBlock)),
-		ToBlock:   big.NewInt(int64(endBlock)),
 		Addresses: []common.Address{usdtAddress},
-		Topics:    [][]common.Hash{{transferTopic}},
+		Topics: [][]common.Hash{{
+			crypto.Keccak256Hash([]byte(TRANSFER_EVENT_SIGNATURE)),
+		}},
 	}
 
-	logs, err := client.FilterLogs(context.Background(), query)
+	// create log channel
+	logs := make(chan types.Log)
+
+	// subscribe to logs
+	sub, err := client.SubscribeFilterLogs(context.Background(), query, logs)
 	if err != nil {
-		return fmt.Errorf("Failed to filter logs: %v", err)
+		log.Fatalf("Failed to subscribe to logs: %v", err)
 	}
 
-	fmt.Printf("Found %d USDT transfer records between blocks %d and %d\n", len(logs), startBlock, endBlock)
+	// create divisor for amount conversion
+	divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals.Uint64())), nil)
 
-	divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
+	// listen to transfer events
+	for {
+		select {
+		case err := <-sub.Err():
+			log.Fatalf("Subscription error: %v", err)
 
-	for _, vLog := range logs {
-		from := common.HexToAddress(vLog.Topics[1].Hex())
-		to := common.HexToAddress(vLog.Topics[2].Hex())
-		amount := new(big.Int).SetBytes(vLog.Data)
-		amount = new(big.Int).Div(amount, divisor)
+		case vLog := <-logs:
+			from := common.HexToAddress(vLog.Topics[1].Hex())
+			to := common.HexToAddress(vLog.Topics[2].Hex())
+			amount := new(big.Int).SetBytes(vLog.Data)
+			amount = new(big.Int).Div(amount, divisor)
 
-		transferType := "Transfer"
-		if from == common.HexToAddress("0x0000000000000000000000000000000000000000") {
-			transferType = "Mint"
+			transferType := "Transfer"
+			if from == common.HexToAddress("0x0000000000000000000000000000000000000000") {
+				transferType = "Mint"
+			}
+
+			fmt.Printf("Block #%d: %s from %s to %s, amount: %s USDT\n",
+				vLog.BlockNumber,
+				transferType,
+				from.Hex(),
+				to.Hex(),
+				amount.String())
 		}
-
-		fmt.Printf("Block #%d: %s from %s to %s, amount: %s USDT\n",
-			vLog.BlockNumber, transferType, from.Hex(), to.Hex(), amount.String())
 	}
-
-	return nil
 }
 
 // NewUSDT creates a new USDT instance
