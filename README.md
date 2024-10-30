@@ -1,6 +1,6 @@
 # go-websocket-usdt
 
-
+Using go coroutine to monitor USDT
 
 ## Dependency
 - ``go get github.com/ethereum/go-ethereum``
