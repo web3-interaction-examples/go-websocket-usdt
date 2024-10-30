@@ -1,7 +1,5 @@
-# go-query-nft
-use go to query usdc
+# go-websocket-usdt
 
-the golang version of https://github.com/web3-interaction-examples/viem-query-usdc
 
 
 ## Dependency
