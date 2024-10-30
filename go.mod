@@ -1,4 +1,5 @@
-module go_websocket_usdt
+
+module github.com/web3-interaction-examples/go-websocket-usdt
 
 go 1.22.5
 
